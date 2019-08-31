@@ -25,7 +25,7 @@ def load_database():
     (x_train, y_train), (_, _) = load_data()
     indx = y_train == 8
     X = x_train[indx]
-    X = expand_dims(X, axis=-1)
+    X = np.expand_dims(X, axis=-1)
     X = X.astype('float32')
     X = (X - 127.5) / 127.5
     return X
