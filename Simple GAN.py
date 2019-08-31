@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
 from sklearn.utils import shuffle
+from keras.datasets.mnist import load_data
 
 plt.close('all')
 
@@ -21,7 +22,13 @@ Z_DIM = 100
 
 
 def load_database():
-    return pickle.load(open('datasets/mnist.pkl', 'rb'))
+    (x_train, y_train), (_, _) = load_data()
+    indx = y_train == 8
+    X = x_train[indx]
+    X = expand_dims(X, axis=-1)
+    X = X.astype('float32')
+    X = (X - 127.5) / 127.5
+    return X
 
 
 def plot_sample(samples, nrows, ncols):
@@ -42,13 +49,12 @@ def plot_sample(samples, nrows, ncols):
 
 class GAN():
 
-    def __init__(self, data, data_label):
+    def __init__(self, data):
         self.name = 'GAN'
 
         tf.compat.v1.reset_default_graph()
 
-        indx = data_label == 8
-        self.real_data = data[indx]
+        self.real_data = data
 
         self.X = tf.compat.v1.placeholder(
             tf.float32, [None, HEIGHT, WIDTH, CHANNEL])
@@ -215,6 +221,5 @@ class GAN():
 
 
 if __name__ == '__main__':
-    x_train, y_train, _, _ = load_database()
-    gan_test = GAN(x_train, y_train)
+    gan_test = GAN(load_database())
     # gan_test.train(nb_batches=1000)
