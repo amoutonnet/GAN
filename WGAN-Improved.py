@@ -248,7 +248,7 @@ class WGAN():
             if self.check_grad:
                 g_grad = self.sess.run(self.gen_gradients_norm, feed_dict={self.Z: noise_batch})
                 d_grad = self.sess.run(self.disc_gradients_norm, feed_dict={self.X: real_batch, self.Z: noise_batch})
-                print('Batch no. %d/%d | dl = %.3f, gl = %.3f | dgrad = %.3f, ggrad = %.3f' % (batch, d_loss, g_loss, d_grad, g_grad))
+                print('Batch no. %d/%d | dl = %.3f, gl = %.3f | dgrad = %.3f, ggrad = %.3f' % (batch, total_batches, d_loss, g_loss, d_grad, g_grad))
             else:
                 print('Batch no. %d/%d | dl = %.3f, gl = %.3f' % (batch, total_batches, d_loss, g_loss))
 
