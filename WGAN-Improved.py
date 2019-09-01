@@ -10,6 +10,7 @@ import pickle
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+import shutil
 from sklearn.utils import shuffle
 from keras.datasets.mnist import load_data
 
@@ -49,7 +50,7 @@ def leaky_relu(x, alpha=0.2):
     return tf.maximum(tf.minimum(0.0, alpha * x), x)
 
 
-class ClipConstraint(tf.keras.constraints.Constraint):
+class ClipConstraint(tf.compat.v1.keras.constraints.Constraint):
     def __init__(self, clip_value):
         self.clip_value = clip_value
 
@@ -67,41 +68,50 @@ class Generator():
 
     def __call__(self, input_noise):
         init = tf.compat.v1.random_normal_initializer(stddev=0.02)
-        regul = tf.contrib.layers.l2_regularizer(2.5e-5)
+        regul = tf.compat.v2.keras.regularizers.L1L2(l2=2.5e-5)
+
         with tf.compat.v1.variable_scope(self.name):
             bs = tf.shape(input_noise)[0]
-            fc1 = tf.contrib.layers.fully_connected(
-                input_noise, 1024,
-                weights_initializer=init,
-                weights_regularizer=regul,
-                activation_fn=tf.identity
-            )
-            fc1 = tf.contrib.layers.batch_norm(fc1)
+            fc1 = tf.compat.v1.keras.layers.Dense(
+                1024,
+                kernel_initializer=init,
+                kernel_regularizer=regul
+            )(input_noise)
+            fc1 = tf.compat.v1.keras.layers.BatchNormalization()(fc1)
             fc1 = tf.nn.relu(fc1)
-            fc2 = tf.contrib.layers.fully_connected(
-                fc1, 7 * 7 * 128,
-                weights_initializer=init,
-                weights_regularizer=regul,
-                activation_fn=tf.identity
-            )
+            fc2 = tf.compat.v1.keras.layers.Dense(
+                7 * 7 * 128,
+                kernel_initializer=init,
+                kernel_regularizer=regul
+            )(fc1)
             fc2 = tf.reshape(fc2, tf.stack([bs, 7, 7, 128]))
-            fc2 = tf.contrib.layers.batch_norm(fc2)
+            fc2 = tf.compat.v1.keras.layers.BatchNormalization()(fc2)
             fc2 = tf.nn.relu(fc2)
-            conv1 = tf.contrib.layers.convolution2d_transpose(
-                fc2, 64, [4, 4], [2, 2],
-                weights_initializer=init,
-                weights_regularizer=regul,
-                activation_fn=tf.identity
-            )
-            conv1 = tf.contrib.layers.batch_norm(conv1)
+            conv1 = tf.compat.v1.keras.layers.Conv2DTranspose(
+                128, [4, 4], [2, 2],
+                kernel_initializer=init,
+                kernel_regularizer=regul,
+                padding='same'
+            )(fc2)
+            conv1 = tf.compat.v1.keras.layers.BatchNormalization()(conv1)
             conv1 = tf.nn.relu(conv1)
-            conv2 = tf.contrib.layers.convolution2d_transpose(
-                conv1, 1, [4, 4], [2, 2],
-                weights_initializer=init,
-                weights_regularizer=regul,
-                activation_fn=tf.sigmoid
-            )
-            return conv2
+            conv2 = tf.compat.v1.keras.layers.Conv2DTranspose(
+                64, [4, 4], [2, 2],
+                kernel_initializer=init,
+                kernel_regularizer=regul,
+                padding='same'
+
+            )(conv1)
+            conv2 = tf.compat.v1.keras.layers.BatchNormalization()(conv2)
+            conv2 = tf.nn.relu(conv2)
+            conv3 = tf.compat.v1.keras.layers.Conv2D(
+                1, [4, 4],
+                kernel_initializer=init,
+                kernel_regularizer=regul,
+                padding='same'
+
+            )(conv2)
+            return conv3
 
     def vars(self):
         return [var for var in tf.compat.v1.global_variables() if self.name in var.name]
@@ -116,28 +126,23 @@ class Discriminator():
         with tf.compat.v1.variable_scope(self.name) as vs:
             if reuse:
                 vs.reuse_variables()
-            bs = tf.shape(input_image)[0]
-            x = tf.reshape(input_image, [bs, 28, 28, 1])
-            conv1 = tf.contrib.layers.convolution2d(
-                x, 64, [4, 4], [2, 2],
-                weights_initializer=init,
-                activation_fn=tf.identity
-            )
+            conv1 = tf.compat.v1.keras.layers.Conv2D(
+                64, [4, 4], [2, 2],
+                kernel_initializer=init
+            )(input_image)
             conv1 = leaky_relu(conv1)
-            conv2 = tf.contrib.layers.convolution2d(
-                conv1, 128, [4, 4], [2, 2],
-                weights_initializer=init,
-                activation_fn=tf.identity
-            )
+            conv2 = tf.compat.v1.keras.layers.Conv2D(
+                128, [4, 4], [2, 2],
+                kernel_initializer=init
+            )(conv1)
             conv2 = leaky_relu(conv2)
-            conv2 = tf.contrib.layers.flatten(conv2)
-            fc1 = tf.contrib.layers.fully_connected(
-                conv2, 1024,
-                weights_initializer=init,
-                activation_fn=tf.identity
-            )
+            conv2 = tf.compat.v1.keras.layers.Flatten()(conv2)
+            fc1 = tf.compat.v1.keras.layers.Dense(
+                1024,
+                kernel_initializer=init
+            )(conv2)
             fc1 = leaky_relu(fc1)
-            out = tf.contrib.layers.fully_connected(fc1, 1, activation_fn=tf.identity)
+            out = tf.compat.v1.keras.layers.Dense(1)(fc1)
             return out
 
     def vars(self):
@@ -146,7 +151,7 @@ class Discriminator():
 
 class WGAN():
 
-    def __init__(self, data, check_grad=False, opt='RMSProp', clip=False, grad_penalty=True):
+    def __init__(self, data, check_grad=False, opt='RMSProp', clip=False, do_grad_penalty=True, reset_model=False):
 
         tf.compat.v1.reset_default_graph()
 
@@ -154,8 +159,18 @@ class WGAN():
         g_net = Generator()
         d_net = Discriminator()
         self.check_grad = check_grad
+        self.do_grad_penalty = do_grad_penalty
         self.opt = opt
         self.clip = clip
+
+        if reset_model:
+            list_files = os.listdir('models/')
+            if(len(list_files) == 0):
+                print('No model found, no reinitialization done...')
+            else:
+                for i in list_files:
+                    os.remove('models/'+i)
+                print('Model reinitialized...')
 
         self.X = tf.compat.v1.placeholder(tf.float32, [None, HEIGHT, WIDTH, CHANNEL])
         self.Z = tf.compat.v1.placeholder(tf.float32, [None, Z_DIM])
@@ -164,18 +179,23 @@ class WGAN():
         real_logits = d_net(self.X)
         fake_logits = d_net(self.generator, reuse=True)
 
-        if grad_penalty:
+        self.disc_loss_real = tf.reduce_mean(real_logits)
+        self.disc_loss_fake = -tf.reduce_mean(fake_logits)
+        self.gen_loss = tf.reduce_mean(fake_logits)
+
+        if self.do_grad_penalty:
             epsilon = tf.compat.v1.random_uniform([], 0.0, 1.0)
             x_hat = epsilon * self.X + (1 - epsilon) * self.generator
             d_hat = d_net(x_hat, reuse=True)
-            gradient_penalty = tf.gradients(d_hat, x_hat)[0]
-            gradient_penalty = tf.sqrt(tf.reduce_sum(tf.square(gradient_penalty), axis=1))
-            gradient_penalty = tf.reduce_mean(tf.square(gradient_penalty - 1.0) * 10)
-            self.disc_loss = tf.reduce_mean(real_logits) - tf.reduce_mean(fake_logits) + gradient_penalty
+            gradients = tf.gradients(d_hat, x_hat)
+            gradient = gradients[0]
+            grad_square = tf.compat.v1.reshape(tf.square(gradient), [-1, 28*28])
+            grad_sum = tf.reduce_sum(grad_square, axis=1)
+            gradient_norm = tf.sqrt(grad_sum)
+            self.gradient_penalty = tf.reduce_mean(tf.square(gradient_norm - 1.0) * 10)
+            self.disc_loss = self.disc_loss_fake + self.disc_loss_real + self.gradient_penalty
         else:
-            self.disc_loss = tf.reduce_mean(real_logits) - tf.reduce_mean(fake_logits)
-
-        self.gen_loss = tf.reduce_mean(fake_logits)
+            self.disc_loss = self.disc_loss_fake + self.disc_loss_real
 
         with tf.compat.v1.control_dependencies(tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.UPDATE_OPS)):
             if self.opt == 'RMSProp':
@@ -198,71 +218,85 @@ class WGAN():
         self.sess = tf.compat.v1.Session(config=tf.compat.v1.ConfigProto(gpu_options=gpu_options))
 
     def train(self, epochs=100, batch_size=64):
-        d_losses = []
-        g_losses = []
+        self.d_losses_real = []
+        self.d_losses_fake = []
+        self.d_losses = []
+        if self.do_grad_penalty:
+            self.grad_penalties = []
+        self.g_losses = []
         n_critics = 5
         self.sess.run(tf.compat.v1.global_variables_initializer())
         self.sess.run(tf.compat.v1.local_variables_initializer())
-        saver = tf.train.Saver()
+        saver = tf.compat.v1.train.Saver()
         if 'model.ckpt.meta' in os.listdir('models/'):
             saver.restore(self.sess, "models/model.ckpt")
             print("Model restored...")
         else:
             print("No saved model found!")
         print('Start Training...')
-        batch = 0
-        epoch = 1
-        data_lenght = len(self.real_data)
-        total_batches = int(data_lenght//batch_size)
-        end = False
-        print('--------------------Epoch no. %d---------------------' % epoch)
-        while 1:
-            for d_iter in range(n_critics):
-                if (batch+1)*batch_size <= data_lenght-1:
-                    real_batch = self.real_data[batch*batch_size:(batch+1)*batch_size]
-                else:
-                    epoch += 1
-                    if epoch > epochs:
-                        end = True
-                        break
-                    self.sample_images(batch, 5, 5)
-                    print('--------------------Epoch no. %d---------------------' % epoch)
-                    batch = 0
-                    self.real_data = shuffle(self.real_data)
-                    real_batch = self.real_data[batch*batch_size:(batch+1)*batch_size]
-                batch += 1
+        self.total_mini_batch_of_batches = int(len(self.real_data)//(batch_size*n_critics))
+        for epoch in range(epochs):
+            print('--------------------Epoch no. %d---------------------' % epoch)
+            self.real_data = shuffle(self.real_data)
+            for mb in range(self.total_mini_batch_of_batches):
+                mini_batch_of_real_batches = self.real_data[mb*batch_size:(mb+n_critics)*batch_size]
+                for d_iter in range(n_critics):
+                    real_batch = mini_batch_of_real_batches[d_iter*batch_size:(d_iter+1)*batch_size]
+                    noise_batch = np.random.normal(0, 1, (batch_size, Z_DIM))
+                    if self.clip:
+                        self.sess.run(self.disc_clip)
+                    self.sess.run(self.disc_step, feed_dict={self.X: real_batch, self.Z: noise_batch})
+
                 noise_batch = np.random.normal(0, 1, (batch_size, Z_DIM))
-                if self.clip:
-                    self.sess.run(self.disc_clip)
-                self.sess.run(self.disc_step, feed_dict={self.X: real_batch, self.Z: noise_batch})
-            if end:
-                break
-            noise_batch = np.random.normal(0, 1, (batch_size, Z_DIM))
-            self.sess.run(self.gen_step, feed_dict={self.Z: noise_batch})
+                self.sess.run(self.gen_step, feed_dict={self.Z: noise_batch})
 
-            g_loss = self.sess.run(self.gen_loss, feed_dict={self.Z: noise_batch})
-            d_loss = self.sess.run(self.disc_loss, feed_dict={self.X: real_batch, self.Z: noise_batch})
-            d_losses += [d_loss]
-            g_losses += [g_loss]
-
-            if self.check_grad:
-                g_grad = self.sess.run(self.gen_gradients_norm, feed_dict={self.Z: noise_batch})
-                d_grad = self.sess.run(self.disc_gradients_norm, feed_dict={self.X: real_batch, self.Z: noise_batch})
-                print('Batch no. %d/%d | dl = %.3f, gl = %.3f | dgrad = %.3f, ggrad = %.3f' % (batch, total_batches, d_loss, g_loss, d_grad, g_grad))
-            else:
-                print('Batch no. %d/%d | dl = %.3f, gl = %.3f' % (batch, total_batches, d_loss, g_loss))
+                self.follow_evolution(epoch, mb, real_batch, noise_batch)
+            self.sample_images(epoch, 5, 5)
 
         saver.save(self.sess, "models/model.ckpt")
         print('Model saved...')
-        self.plot_losses(d_losses, g_losses)
+        self.plot_losses()
 
-    def plot_losses(self, d_losses, g_losses):
+    def follow_evolution(self, epoch, mb, real_batch, noise_batch):
+        to_print = 'E.%d | B.%d/%d' % (epoch, mb, self.total_mini_batch_of_batches)
+        if self.do_grad_penalty:
+            d_loss_real, d_loss_fake, g_penalty = self.sess.run([self.disc_loss_real, self.disc_loss_fake,
+                                                                 self.gradient_penalty], feed_dict={self.X: real_batch, self.Z: noise_batch})
+            d_loss = d_loss_real + d_loss_fake + g_penalty
+            self.grad_penalties += [g_penalty]
+            to_print += ' | dlr = %.3f, dlr = %.3f, dl = %.3f, gp = %.3f' % (d_loss_real, d_loss_fake, d_loss, g_penalty)
+        else:
+            d_loss_real, d_loss_fake = self.sess.run([self.disc_loss_real, self.disc_loss_fake],
+                                                     feed_dict={self.X: real_batch, self.Z: noise_batch})
+            d_loss = d_loss_real + d_loss_fake
+            to_print += ' | dlr = %.3f, dlr = %.3f, dl = %.3f' % (d_loss_real, d_loss_fake, d_loss)
+
+        g_loss = self.sess.run(self.gen_loss, feed_dict={self.Z: noise_batch})
+        to_print += ' | gl = %.3f' % g_loss
+
+        if self.check_grad:
+            g_grad = self.sess.run(self.gen_gradients_norm, feed_dict={self.Z: noise_batch})
+            d_grad = self.sess.run(self.disc_gradients_norm, feed_dict={self.X: real_batch, self.Z: noise_batch})
+            to_print += ' | dgrad = %.3f, ggrad = %.3f' % (d_grad, g_grad)
+
+        self.d_losses_real += [d_loss_real]
+        self.d_losses_fake += [d_loss_fake]
+        self.d_losses += [d_loss]
+        self.g_losses += [g_loss]
+
+        print(to_print)
+
+    def plot_losses(self):
         plt.figure()
-        plt.plot(d_losses)
-        plt.plot(g_losses)
+        plt.plot(self.d_losses_real)
+        plt.plot(self.d_losses_fake)
+        plt.plot(self.g_losses)
+        if self.do_grad_penalty:
+            plt.plot(self.grad_penalties)
+        plt.title('Loss evolution')
         plt.show()
 
-    def sample_images(self, batch, nrows, ncols):
+    def sample_images(self, epoch, nrows, ncols):
         fig, ax = plt.subplots(nrows=nrows, ncols=ncols, figsize=(6, 6), sharex=True, sharey=True)
         noise = np.random.normal(0, 1, (nrows*ncols, Z_DIM))
         gen_imgs = self.sess.run(self.generator, feed_dict={self.Z: noise})
@@ -273,10 +307,10 @@ class WGAN():
                 ax[i][j].imshow(img, cmap='gray')
                 ax[i][j].get_xaxis().set_visible(False)
                 ax[i][j].get_yaxis().set_visible(False)
-        fig.suptitle('Sample generated by the GAN')
+        fig.suptitle('Sample generated by the GAN at epoch %d' % epoch)
         fig.savefig('generated/uptodate.png')
 
 
 if __name__ == '__main__':
-    gan_test = WGAN(load_database(), check_grad=False, opt='Adam')
-    gan_test.train(epochs=2, batch_size=256)
+    gan_test = WGAN(load_database(), check_grad=True, clip=False, opt='Adam', reset_model=True, do_grad_penalty=True)
+    gan_test.train(epochs=1, batch_size=64)
