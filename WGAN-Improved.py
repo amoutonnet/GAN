@@ -20,7 +20,7 @@ DATASET = 'mnist'
 WIDTH = 28
 HEIGHT = 28
 CHANNEL = 1
-Z_DIM = 128
+Z_DIM = 100
 
 
 def load_database():
@@ -30,8 +30,8 @@ def load_database():
         x_train = x_train[indx.squeeze()]
     else:
         (x_train, y_train), (_, _) = datasets.mnist.load_data()
-        indx = y_train == 5
-        x_train = x_train[indx]
+        # indx = 1-y_train*False
+        # x_train = x_train[indx]
         x_train = np.expand_dims(x_train, axis=-1)
     X = x_train.astype('float32')
     X = (X - 127.5) / 127.5
@@ -67,27 +67,30 @@ def pixel_norm(x, epsilon=1e-8):
     return x * tf.math.rsqrt(tf.reduce_mean(tf.square(x), axis=3, keepdims=True) + epsilon)
 
 
-def get_weights(shape, fan_in=None):
+def get_weights(shape, fan_in=None, num=1):
     if fan_in is None:
         fan_in = np.sqrt(np.prod(shape[:-1]))
     std = np.sqrt(2) / fan_in
     wscale = tf.constant(np.float32(std))
-    return tf.compat.v1.get_variable('weights', shape=shape, initializer=tf.initializers.random_normal()) * wscale
+    return tf.compat.v1.get_variable('weights_%d' % num, shape=shape, initializer=tf.initializers.random_normal()) * wscale
 
 
-def add_bias(z):
-    b = tf.compat.v1.get_variable('biases', [z.shape[-1]], initializer=tf.constant_initializer(0.))
+def add_bias(z, num=1):
+    b = tf.compat.v1.get_variable('biases_%d' % num, [z.shape[-1]], initializer=tf.constant_initializer(0.))
     if len(z.shape) == 2:
         return z + b
     else:
         return z + tf.reshape(b, [1, 1, 1, -1])
 
 
-def conv2d(input_, n_filters, k_size):
-    w = get_weights([k_size, k_size, input_.shape[-1].value, n_filters])
-    strides = [1, 2, 2, 1]
-    output = tf.nn.conv2d(input_, w, strides, padding='SAME')
-    return add_bias(output)
+def conv2d(input_, n_filters, k_size, strides=[2, 2], num=1):
+    w = get_weights([k_size, k_size, input_.shape[-1].value, n_filters], num=num)
+    if strides == [2, 2]:
+        w = tf.pad(w, [[1, 1], [1, 1], [0, 0], [0, 0]], mode='CONSTANT')
+        w = tf.add_n([w[1:, 1:], w[:-1, 1:], w[1:, :-1], w[:-1, :-1]]) * 0.25
+        return add_bias(tf.nn.conv2d(input_, w, [1, 2, 2, 1], padding='SAME'), num)
+    else:
+        return add_bias(tf.nn.conv2d(input_, w, [1, 1, 1, 1], padding='SAME'), num)
 
 
 def conv2dtranspose(input_, n_filters, k_size):
@@ -95,15 +98,15 @@ def conv2dtranspose(input_, n_filters, k_size):
     w = tf.pad(w, [[1, 1], [1, 1], [0, 0], [0, 0]], mode='CONSTANT')
     w = tf.add_n([w[1:, 1:], w[:-1, 1:], w[1:, :-1], w[:-1, :-1]])
     os = [tf.shape(input_)[0], input_.shape[1].value * 2, input_.shape[2].value * 2, n_filters]
-    return tf.nn.conv2d_transpose(input_, w, os, strides=[1, 2, 2, 1], padding='SAME')
+    return add_bias(tf.nn.conv2d_transpose(input_, w, os, strides=[1, 2, 2, 1], padding='SAME'))
 
 
-def dense(input_, n_neurons):
-    w = get_weights([input_.shape[1].value, n_neurons])
-    return add_bias(tf.matmul(input_, w))
+def dense(input_, n_neurons, num=1):
+    w = get_weights([input_.shape[1].value, n_neurons], num=num)
+    return add_bias(tf.matmul(input_, w), num=num)
 
 
-def minibatch_stddev_layer(input_):
+def mbstd_layer(input_):
     s = input_.get_shape().as_list()
     y = tf.reshape(input_, [4, -1, s[1], s[2], s[3]])
     y -= tf.reduce_mean(y, axis=0, keepdims=True)
@@ -112,6 +115,15 @@ def minibatch_stddev_layer(input_):
     y = tf.reduce_mean(y, axis=[1, 2, 3], keepdims=True)
     y = tf.tile(y, [4, s[1], s[2], 1])
     return tf.concat([input_, y], axis=3)
+
+
+def get_nb_layer():
+    a = WIDTH
+    nb_layer = 0
+    while a-int(a) == 0 and a > 2:
+        nb_layer += 1
+        a /= 2
+    return nb_layer, int(a*2)
 
 
 class ClipConstraint(tf.compat.v1.keras.constraints.Constraint):
@@ -127,36 +139,23 @@ class ClipConstraint(tf.compat.v1.keras.constraints.Constraint):
 
 class Generator():
 
-    def __init__(self, nb_filter=128, nb_layers=2, filter_size=5):
+    def __init__(self, nb_filter_on_greatest_layer=128, filter_size=5):
         self.name = 'GAN/Generator'
-        self.initial_nb_filter = int(nb_filter * 2**(nb_layers-1))
-        self.nb_layers = nb_layers
+        self.nb_filter_on_greatest_layer = nb_filter_on_greatest_layer
+        self.nb_layers, self.initial_size = get_nb_layer()
         self.filter_size = filter_size
         self.summary = 'Generator caracteristics :\n'
 
     def __call__(self, input_noise):
-        initial_shape = [int(WIDTH/2**self.nb_layers), int(HEIGHT/2**self.nb_layers)]
         with tf.compat.v1.variable_scope(self.name):
             self.summary += 'Input : %s\n' % str(input_noise)
-            with tf.compat.v1.variable_scope('dense_layer1'):
-                x = dense(input_noise, initial_shape[0]*initial_shape[1]*self.initial_nb_filter)
-                x = tf.reshape(x, [-1, initial_shape[0], initial_shape[1], self.initial_nb_filter])
-                x = leaky_relu(x)
-                x = pixel_norm(x)
-            self.summary += 'Conv1 : %s\n' % str(x)
-            nb_filter = int(self.initial_nb_filter/2)
+            x = self.first_layer(input_noise)
+            nb_filters = int(self.nb_filter_on_greatest_layer/2)
             for layer in range(self.nb_layers-1):
-                with tf.compat.v1.variable_scope('conv2dtranspose_layer%d' % (layer+1)):
-                    x = conv2dtranspose(x, nb_filter, self.filter_size)
-                    x = leaky_relu(x)
-                    x = pixel_norm(x)
-                self.summary += 'Conv%d : %s\n' % (layer+2, str(x))
-                nb_filter = int(nb_filter/2)
-            with tf.compat.v1.variable_scope('conv2dtranspose_layer%d' % (self.nb_layers)):
-                x = conv2dtranspose(x, CHANNEL, self.filter_size)
-                out = tf.tanh(x)
-                self.summary += 'Output : %s\n' % str(out)
-            return out
+                x = self.block(x, nb_filters, layer+1)
+                nb_filters //= 2
+            output = self.to_image(x, 1)
+            return output
 
     def vars(self):
         return [var for var in tf.compat.v1.global_variables() if self.name in var.name]
@@ -164,47 +163,76 @@ class Generator():
     def print_summary(self):
         print(self.summary)
 
+    def first_layer(self, input_):
+        with tf.compat.v1.variable_scope('From_noise_layer'):
+            x = dense(input_, self.nb_filter_on_greatest_layer*self.initial_size*self.initial_size)
+            x = tf.reshape(x, [-1, self.initial_size, self.initial_size, self.nb_filter_on_greatest_layer])
+            x = leaky_relu(x)
+            output = pixel_norm(x)
+            self.summary += 'From_noise_layer : %s\n' % str(output)
+            return output
+
+    def block(self, input_, nb_filter, num):
+        with tf.compat.v1.variable_scope('Gen_conv_block_layer_%d' % num):
+            x = conv2dtranspose(input_, nb_filter, self.filter_size)
+            x = leaky_relu(x)
+            output = pixel_norm(x)
+            self.summary += 'Gen_block_layer_%d : %s\n' % (num, str(output))
+            return output
+
+    def to_image(self, input_, num):
+        with tf.compat.v1.variable_scope('To_image_layer_%d' % num):
+            output = tf.tanh(conv2d(input_, CHANNEL, self.filter_size, strides=[1, 1]))
+            self.summary += 'To_image_layer_%d : %s\n' % (num, str(output))
+            return output
+
 
 class Critic():
-    def __init__(self, nb_filter=128, nb_layers=3, filter_size=5):
+    def __init__(self, nb_filter_on_greatest_layer=128, filter_size=5):
         self.name = 'GAN/Critic'
-        self.initial_nb_filter = nb_filter
-        self.nb_layers = nb_layers
+        self.nb_layers, self.initial_size = get_nb_layer()
+        self.initial_nb_filter = int(nb_filter_on_greatest_layer/2**(self.nb_layers-1))
         self.filter_size = filter_size
         self.summary = 'Critic caracteristics :\n'
 
     def __call__(self, input_image, reuse=False):
-        with tf.compat.v1.variable_scope(self.name, reuse=reuse) as vs:
+        with tf.compat.v1.variable_scope(self.name, reuse=reuse):
             if not reuse:
                 self.summary += 'Input : %s\n' % str(input_image)
             nb_filter = self.initial_nb_filter
-            for layer in range(self.nb_layers-1):
-                with tf.compat.v1.variable_scope('conv%d' % (layer+1), reuse=reuse):
-                    x = conv2d((x if layer > 0 else input_image), nb_filter, self.filter_size)
-                    x = leaky_relu(x)
-                if not reuse:
-                    self.summary += 'conv_layer%d : %s\n' % (layer+1, str(x))
+            for layer in range(self.nb_layers):
+                x = self.block((x if layer > 0 else input_image), nb_filter, layer+1, reuse, layer == self.nb_layers-2)
                 nb_filter *= 2
-            with tf.compat.v1.variable_scope('minibatch_stddev_layer1', reuse=reuse):
-                x = minibatch_stddev_layer(x)
-                if not reuse:
-                    self.summary += 'Minibatch_stddev_layer : %s\n' % str(x)
-            with tf.compat.v1.variable_scope('conv%d' % self.nb_layers, reuse=reuse):
-                x = conv2d(x, nb_filter, self.filter_size)
-                x = leaky_relu(x)
-                if not reuse:
-                    self.summary += 'conv_layer%d : %s\n' % (self.nb_layers, str(x))
-            x = tf.compat.v1.keras.layers.Flatten()(x)
-            out = dense(x, 1)
-            if not reuse:
-                self.summary += 'Output : %s\n' % str(out)
-            return tf.nn.sigmoid(out), out
+            return self.to_logit(x, reuse)
 
     def vars(self):
         return [var for var in tf.compat.v1.global_variables() if self.name in var.name]
 
     def print_summary(self):
         print(self.summary)
+
+    def block(self, input_, nb_filter, num, reuse, last):
+        with tf.compat.v1.variable_scope('Crit_block_layer_%d' % num, reuse=reuse):
+            x = mbstd_layer(input_) if last else input_
+            if num == 1:
+                x = conv2d(x, nb_filter, self.filter_size, [1, 1])
+                x = conv2d(x, nb_filter, self.filter_size, [1, 1], num=2)
+            else:
+                x = conv2d(x, nb_filter, self.filter_size, [1, 1])
+                x = conv2d(x, nb_filter, self.filter_size, num=2)
+            output = leaky_relu(x)
+            if not reuse:
+                self.summary += 'Crit_block_layer_%d : %s\n' % (num, str(output))
+            return output
+
+    def to_logit(self, input_, reuse):
+        with tf.compat.v1.variable_scope('To_logit_layer', reuse=reuse):
+            # x = conv2d(input_, input_.shape[3], self.filter_size, [1, 1], 1)
+            x = tf.compat.v1.keras.layers.Flatten()(input_)
+            output = dense(x, 1, 2)
+            if not reuse:
+                self.summary += 'To_logit_layer : %s\n' % str(output)
+            return tf.nn.sigmoid(output), output
 
 
 class WGAN():
@@ -215,11 +243,11 @@ class WGAN():
 
         self.real_data = shuffle(data)
         if(DATASET == 'cifar'):
-            g_net = Generator(64, 3, 5)
-            c_net = Critic(64, 3, 5)
+            g_net = Generator(128, 5)
+            c_net = Critic(128, 5)
         else:
-            g_net = Generator(64, 2, 5)
-            c_net = Critic(256, 2, 5)
+            g_net = Generator(16, 5)
+            c_net = Critic(64, 5)
 
         self.check_grad = check_grad
         self.do_grad_penalty = do_grad_penalty
@@ -240,8 +268,8 @@ class WGAN():
 
         self.generator = g_net(self.Z)
         real_output, real_logits = c_net(self.X)
-        g_net.print_summary()
-        c_net.print_summary()
+        # g_net.print_summary()
+        # c_net.print_summary()
         fake_output, fake_logits = c_net(self.generator, reuse=True)
         self.crit_acc_real = tf.reduce_mean(tf.cast(tf.equal(tf.round(real_output), tf.ones_like(real_output)), tf.float32))
         self.crit_acc_fake = tf.reduce_mean(tf.cast(tf.equal(tf.round(fake_output), tf.zeros_like(fake_output)), tf.float32))
@@ -260,12 +288,7 @@ class WGAN():
         else:
             self.crit_loss = self.crit_loss_fake + self.crit_loss_real
 
-        print('Critic parameters :')
-        for param in c_net.vars():
-            print(param)
-        print('Generator parameters :')
-        for param in g_net.vars():
-            print(param)
+        self.parameters_summary(c_net.vars(), g_net.vars())
 
         if self.opt == 'RMSProp':
             self.gen_step = tf.compat.v1.train.RMSPropOptimizer(
@@ -273,8 +296,8 @@ class WGAN():
             self.crit_step = tf.compat.v1.train.RMSPropOptimizer(
                 learning_rate=5e-5).minimize(self.crit_loss, var_list=c_net.vars())
         else:
-            self.gen_step = tf.compat.v1.train.AdamOptimizer(learning_rate=1e-4, beta1=0, beta2=0.9).minimize(self.gen_loss, var_list=g_net.vars())
-            self.crit_step = tf.compat.v1.train.AdamOptimizer(learning_rate=1e-4, beta1=0, beta2=0.9).minimize(self.crit_loss, var_list=c_net.vars())
+            self.gen_step = tf.compat.v1.train.AdamOptimizer(learning_rate=1e-4, beta1=0, beta2=0.99).minimize(self.gen_loss, var_list=g_net.vars())
+            self.crit_step = tf.compat.v1.train.AdamOptimizer(learning_rate=1e-4, beta1=0, beta2=0.99).minimize(self.crit_loss, var_list=c_net.vars())
 
         if self.check_grad:
             self.crit_gradients_norm = tf.compat.v1.norm(tf.compat.v1.gradients(self.crit_loss, c_net.vars())[0])
@@ -285,6 +308,20 @@ class WGAN():
 
         gpu_options = tf.compat.v1.GPUOptions(allow_growth=True)
         self.sess = tf.compat.v1.Session(config=tf.compat.v1.ConfigProto(gpu_options=gpu_options))
+
+    def parameters_summary(self, c_vars, g_vars):
+        print('Critic parameters :')
+        nb_params = 0
+        for param in c_vars:
+            nb_params += np.prod(param.shape.as_list())
+            print(param)
+        print('Total critic trainable parameters : %d' % int(nb_params))
+        nb_params = 0
+        print('Generator parameters :')
+        for param in g_vars:
+            nb_params += np.prod(param.shape.as_list())
+            print(param)
+        print('Total generator trainable parameters : %d' % int(nb_params))
 
     def train(self, epochs=100, batch_size=64):
         self.c_losses_real, self.c_losses_fake, self.c_losses, self.g_losses = [], [], [], []
@@ -318,7 +355,10 @@ class WGAN():
                     self.sess.run(self.gen_step, feed_dict={self.Z: noise_batch})
 
                 self.follow_evolution(epoch+1, mb+1, real_batch, noise_batch)
-            if(epoch % int(epochs/4) == 0):
+            if epochs > 4:
+                if(epoch % int(epochs/4) == 0):
+                    self.sample_images(epoch, 5, 5)
+            else:
                 self.sample_images(epoch, 5, 5)
 
         saver.save(self.sess, "models/model.ckpt")
@@ -373,5 +413,5 @@ class WGAN():
 
 
 if __name__ == '__main__':
-    gan_test = WGAN(load_database(), check_grad=False, clip=False, opt='Adam', reset_model=True, do_grad_penalty=True)
+    gan_test = WGAN(load_database(), check_grad=False, clip=False, opt='RMSProp', reset_model=True, do_grad_penalty=True)
     gan_test.train(epochs=4, batch_size=64)
