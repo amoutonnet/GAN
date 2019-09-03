@@ -5,22 +5,18 @@ Created on Wed Aug 28 21:27:21 2019
 @author: adamm
 """
 
-import tensorflow as tf
+import os
 import pickle
+import shutil
+
+import keras.datasets as datasets
 import matplotlib.pyplot as plt
 import numpy as np
-import os
-import shutil
+import tensorflow as tf
+from scipy.ndimage.interpolation import zoom
 from sklearn.utils import shuffle
-import keras.datasets as datasets
 
 plt.close('all')
-
-DATASET = 'mnist'
-WIDTH = 28
-HEIGHT = 28
-CHANNEL = 1
-Z_DIM = 100
 
 
 def load_database():
@@ -86,8 +82,6 @@ def add_bias(z, num=1):
 def conv2d(input_, n_filters, k_size, strides=[2, 2], num=1):
     w = get_weights([k_size, k_size, input_.shape[-1].value, n_filters], num=num)
     if strides == [2, 2]:
-        w = tf.pad(w, [[1, 1], [1, 1], [0, 0], [0, 0]], mode='CONSTANT')
-        w = tf.add_n([w[1:, 1:], w[:-1, 1:], w[1:, :-1], w[:-1, :-1]]) * 0.25
         return add_bias(tf.nn.conv2d(input_, w, [1, 2, 2, 1], padding='SAME'), num)
     else:
         return add_bias(tf.nn.conv2d(input_, w, [1, 1, 1, 1], padding='SAME'), num)
@@ -95,8 +89,6 @@ def conv2d(input_, n_filters, k_size, strides=[2, 2], num=1):
 
 def conv2dtranspose(input_, n_filters, k_size):
     w = get_weights([k_size, k_size, n_filters, input_.shape[-1].value], k_size*k_size*input_.shape[-1].value)
-    w = tf.pad(w, [[1, 1], [1, 1], [0, 0], [0, 0]], mode='CONSTANT')
-    w = tf.add_n([w[1:, 1:], w[:-1, 1:], w[1:, :-1], w[:-1, :-1]])
     os = [tf.shape(input_)[0], input_.shape[1].value * 2, input_.shape[2].value * 2, n_filters]
     return add_bias(tf.nn.conv2d_transpose(input_, w, os, strides=[1, 2, 2, 1], padding='SAME'))
 
@@ -117,13 +109,37 @@ def mbstd_layer(input_):
     return tf.concat([input_, y], axis=3)
 
 
-def get_nb_layer():
+def upscale2d(input_):
+    s = input_.shape
+    x = tf.reshape(input_, [-1, s[1], 1, s[2], 1, s[3]])
+    x = tf.tile(x, [1, 1, 2, 1, 2, 1])
+    output = tf.reshape(x, [-1, s[1] * 2, s[2] * 2, s[3]])
+    return output
+
+
+def downscale2d(input_):
+    ksize = [1, 2, 2, 1]
+    return tf.nn.avg_pool(input_, ksize=ksize, strides=ksize, padding='VALID')
+
+
+def transition(a, b, alpha_trans):
+    return (1-alpha_trans) * a + alpha_trans * b
+
+
+def get_resolutions():
     a = WIDTH
-    nb_layer = 0
+    res = [a]
     while a-int(a) == 0 and a > 2:
-        nb_layer += 1
         a /= 2
-    return nb_layer, int(a*2)
+        res = [int(a)] + res
+    return res[1:]
+
+
+def get_filters(res, greatest_number):
+    nb_filters = [greatest_number]
+    for i in range(len(res)-1):
+        nb_filters += [int(nb_filters[-1]/2)]
+    return nb_filters
 
 
 class ClipConstraint(tf.compat.v1.keras.constraints.Constraint):
@@ -139,23 +155,21 @@ class ClipConstraint(tf.compat.v1.keras.constraints.Constraint):
 
 class Generator():
 
-    def __init__(self, nb_filter_on_greatest_layer=128, filter_size=5):
+    def __init__(self, nb_filter_on_greatest_layer, filter_size, res, alphas_transition):
         self.name = 'GAN/Generator'
-        self.nb_filter_on_greatest_layer = nb_filter_on_greatest_layer
-        self.nb_layers, self.initial_size = get_nb_layer()
+        self.res = res
+        self.lowest_res = self.res[0]
+        self.nb_filter = get_filters(self.res, nb_filter_on_greatest_layer)
         self.filter_size = filter_size
+        self.outputs = []
         self.summary = 'Generator caracteristics :\n'
+        self.alphas_transition = alphas_transition
 
     def __call__(self, input_noise):
         with tf.compat.v1.variable_scope(self.name):
             self.summary += 'Input : %s\n' % str(input_noise)
-            x = self.first_layer(input_noise)
-            nb_filters = int(self.nb_filter_on_greatest_layer/2)
-            for layer in range(self.nb_layers-1):
-                x = self.block(x, nb_filters, layer+1)
-                nb_filters //= 2
-            output = self.to_image(x, 1)
-            return output
+            self.grow(input_noise, len(self.res)-1)
+            return self.outputs
 
     def vars(self):
         return [var for var in tf.compat.v1.global_variables() if self.name in var.name]
@@ -163,63 +177,64 @@ class Generator():
     def print_summary(self):
         print(self.summary)
 
-    def first_layer(self, input_):
-        with tf.compat.v1.variable_scope('From_noise_layer'):
-            x = dense(input_, self.nb_filter_on_greatest_layer*self.initial_size*self.initial_size)
-            x = tf.reshape(x, [-1, self.initial_size, self.initial_size, self.nb_filter_on_greatest_layer])
-            x = leaky_relu(x)
-            output = pixel_norm(x)
-            self.summary += 'From_noise_layer : %s\n' % str(output)
-            return output
-
-    def block(self, input_, nb_filter, num):
+    def block(self, input_, nb_filter, res, num):
         with tf.compat.v1.variable_scope('Gen_conv_block_layer_%d' % num):
-            x = conv2dtranspose(input_, nb_filter, self.filter_size)
+            if(res == self.lowest_res):
+                x = dense(input_, self.nb_filter[0]*self.lowest_res*self.lowest_res)
+                x = tf.reshape(x, [-1, self.lowest_res, self.lowest_res, self.nb_filter[0]])
+            else:
+                x = conv2dtranspose(input_, nb_filter, self.filter_size)
             x = leaky_relu(x)
             output = pixel_norm(x)
             self.summary += 'Gen_block_layer_%d : %s\n' % (num, str(output))
             return output
 
-    def to_image(self, input_, num):
-        with tf.compat.v1.variable_scope('To_image_layer_%d' % num):
+    def to_image(self, input_, ind, num):
+        with tf.compat.v1.variable_scope('To_image_layer_%d_%d' % (ind, num)):
             output = tf.tanh(conv2d(input_, CHANNEL, self.filter_size, strides=[1, 1]))
-            self.summary += 'To_image_layer_%d : %s\n' % (num, str(output))
+            self.summary += 'To_image_layer_%d_%d : %s\n' % (ind, num, str(output))
             return output
+
+    def grow(self, input_, res_ind):
+        if res_ind > 0:
+            y = self.grow(input_, res_ind-1)
+            x = self.block(y, self.nb_filter[res_ind], self.res[res_ind], res_ind+1)
+            self.outputs += [transition(self.to_image(upscale2d(y), res_ind+1, 1), self.to_image(x, res_ind+1, 2),
+                                        self.alphas_transition[res_ind-1])]
+            return x
+        else:
+            x = self.block(input_, self.nb_filter[res_ind], self.res[res_ind], res_ind+1)
+            self.outputs += [self.to_image(x, res_ind, 1)]
+            return x
 
 
 class Critic():
-    def __init__(self, nb_filter_on_greatest_layer=128, filter_size=5):
+    def __init__(self, nb_filter_on_greatest_layer, filter_size, res, alphas_transition):
         self.name = 'GAN/Critic'
-        self.nb_layers, self.initial_size = get_nb_layer()
-        self.initial_nb_filter = int(nb_filter_on_greatest_layer/2**(self.nb_layers-1))
+        self.res = res
+        self.nb_filter = get_filters(self.res, nb_filter_on_greatest_layer)
         self.filter_size = filter_size
         self.summary = 'Critic caracteristics :\n'
+        self.alphas_transition = alphas_transition
 
     def __call__(self, input_image, reuse=False):
         with tf.compat.v1.variable_scope(self.name, reuse=reuse):
             if not reuse:
                 self.summary += 'Input : %s\n' % str(input_image)
-            nb_filter = self.initial_nb_filter
-            for layer in range(self.nb_layers):
-                x = self.block((x if layer > 0 else input_image), nb_filter, layer+1, reuse, layer == self.nb_layers-2)
-                nb_filter *= 2
+            x = self.grow(input_image, len(self.res)-1, reuse)
             return self.to_logit(x, reuse)
 
-    def vars(self):
+    def vars(self, layer='all'):
+
         return [var for var in tf.compat.v1.global_variables() if self.name in var.name]
 
     def print_summary(self):
         print(self.summary)
 
-    def block(self, input_, nb_filter, num, reuse, last):
+    def block(self, input_, nb_filter, num, reuse):
         with tf.compat.v1.variable_scope('Crit_block_layer_%d' % num, reuse=reuse):
-            x = mbstd_layer(input_) if last else input_
-            if num == 1:
-                x = conv2d(x, nb_filter, self.filter_size, [1, 1])
-                x = conv2d(x, nb_filter, self.filter_size, [1, 1], num=2)
-            else:
-                x = conv2d(x, nb_filter, self.filter_size, [1, 1])
-                x = conv2d(x, nb_filter, self.filter_size, num=2)
+            x = conv2d(input_, nb_filter, self.filter_size, [1, 1], num=1)
+            x = conv2d(x, nb_filter, self.filter_size, [1, 1] if num == 1 else [2, 2], num=2)
             output = leaky_relu(x)
             if not reuse:
                 self.summary += 'Crit_block_layer_%d : %s\n' % (num, str(output))
@@ -227,12 +242,21 @@ class Critic():
 
     def to_logit(self, input_, reuse):
         with tf.compat.v1.variable_scope('To_logit_layer', reuse=reuse):
-            # x = conv2d(input_, input_.shape[3], self.filter_size, [1, 1], 1)
-            x = tf.compat.v1.keras.layers.Flatten()(input_)
-            output = dense(x, 1, 2)
+            x = mbstd_layer(input_)
+            x = conv2d(x, input_.shape[3], self.filter_size, [1, 1], num=1)
+            x = tf.compat.v1.keras.layers.Flatten()(x)
+            output = dense(x, 1, num=2)
             if not reuse:
                 self.summary += 'To_logit_layer : %s\n' % str(output)
             return tf.nn.sigmoid(output), output
+
+    def grow(self, input_, res_ind, reuse, num=1):
+        if res_ind > 0:
+            x = self.block(input_, self.nb_filter[res_ind], num, reuse)
+            self.outputs = []
+            return self.grow(x, res_ind-1, reuse, num+1)
+        else:
+            return self.block(input_, self.nb_filter[res_ind], num, reuse)
 
 
 class WGAN():
@@ -242,12 +266,13 @@ class WGAN():
         tf.compat.v1.reset_default_graph()
 
         self.real_data = shuffle(data)
-        if(DATASET == 'cifar'):
-            g_net = Generator(128, 5)
-            c_net = Critic(128, 5)
-        else:
-            g_net = Generator(16, 5)
-            c_net = Critic(64, 5)
+        self.res = get_resolutions()
+
+        with tf.compat.v1.variable_scope('GAN/Transition'):
+            self.alphas_transition = [tf.compat.v1.Variable(0., 'alpha_%d' % i) for i in range(len(self.res)-1)]
+
+        self.g_net = Generator(128, 3, self.res, self.alphas_transition)
+        self.c_net = Critic(128, 3, self.res, self.alphas_transition)
 
         self.check_grad = check_grad
         self.do_grad_penalty = do_grad_penalty
@@ -266,11 +291,11 @@ class WGAN():
         self.X = tf.compat.v1.placeholder(tf.float32, [None, HEIGHT, WIDTH, CHANNEL])
         self.Z = tf.compat.v1.placeholder(tf.float32, [None, Z_DIM])
 
-        self.generator = g_net(self.Z)
-        real_output, real_logits = c_net(self.X)
-        # g_net.print_summary()
-        # c_net.print_summary()
-        fake_output, fake_logits = c_net(self.generator, reuse=True)
+        self.generator = self.g_net(self.Z)
+        real_output, real_logits = self.c_net(self.X)
+        # self.g_net.print_summary()
+        # self.c_net.print_summary()
+        fake_output, fake_logits = self.c_net(self.generator, reuse=True)
         self.crit_acc_real = tf.reduce_mean(tf.cast(tf.equal(tf.round(real_output), tf.ones_like(real_output)), tf.float32))
         self.crit_acc_fake = tf.reduce_mean(tf.cast(tf.equal(tf.round(fake_output), tf.zeros_like(fake_output)), tf.float32))
         self.crit_loss_real = -tf.reduce_mean(real_logits)
@@ -280,7 +305,7 @@ class WGAN():
         if self.do_grad_penalty:
             epsilon = tf.compat.v1.random_uniform([], 0.0, 1.0)
             x_hat = epsilon * self.X + (1 - epsilon) * self.generator
-            c_hat = c_net(x_hat, reuse=True)
+            c_hat = self.c_net(x_hat, reuse=True)
             gradients = tf.gradients(c_hat, [x_hat])[0]
             slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), reduction_indices=[1, 2, 3]))
             self.gradient_penalty = tf.reduce_mean(tf.square(slopes - 1.0))*10
@@ -288,23 +313,22 @@ class WGAN():
         else:
             self.crit_loss = self.crit_loss_fake + self.crit_loss_real
 
-        self.parameters_summary(c_net.vars(), g_net.vars())
+        self.parameters_summary(self.c_net.vars(), self.g_net.vars())
 
         if self.opt == 'RMSProp':
-            self.gen_step = tf.compat.v1.train.RMSPropOptimizer(
-                learning_rate=5e-5).minimize(self.gen_loss, var_list=g_net.vars())
-            self.crit_step = tf.compat.v1.train.RMSPropOptimizer(
-                learning_rate=5e-5).minimize(self.crit_loss, var_list=c_net.vars())
+            self.optimizer = tf.compat.v1.train.RMSPropOptimizer(learning_rate=5e-5)
         else:
-            self.gen_step = tf.compat.v1.train.AdamOptimizer(learning_rate=1e-4, beta1=0, beta2=0.99).minimize(self.gen_loss, var_list=g_net.vars())
-            self.crit_step = tf.compat.v1.train.AdamOptimizer(learning_rate=1e-4, beta1=0, beta2=0.99).minimize(self.crit_loss, var_list=c_net.vars())
+            self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=1e-4, beta1=0, beta2=0.99)
+
+        self.gen_step = self.optimizer.minimize(self.gen_loss, var_list=self.g_net.vars())
+        self.crit_step = self.optimizer.minimize(self.crit_loss, var_list=self.c_net.vars())
 
         if self.check_grad:
-            self.crit_gradients_norm = tf.compat.v1.norm(tf.compat.v1.gradients(self.crit_loss, c_net.vars())[0])
-            self.gen_gradients_norm = tf.compat.v1.norm(tf.compat.v1.gradients(self.gen_loss, g_net.vars())[0])
+            self.crit_gradients_norm = tf.compat.v1.norm(tf.compat.v1.gradients(self.crit_loss, self.c_net.vars())[0])
+            self.gen_gradients_norm = tf.compat.v1.norm(tf.compat.v1.gradients(self.gen_loss, self.g_net.vars())[0])
 
         if self.clip:
-            self.crit_clip = [v.assign(tf.clip_by_value(v, -0.01, 0.01)) for v in c_net.vars()]
+            self.crit_clip = [v.assign(tf.clip_by_value(v, -0.01, 0.01)) for v in self.c_net.vars()]
 
         gpu_options = tf.compat.v1.GPUOptions(allow_growth=True)
         self.sess = tf.compat.v1.Session(config=tf.compat.v1.ConfigProto(gpu_options=gpu_options))
@@ -357,9 +381,9 @@ class WGAN():
                 self.follow_evolution(epoch+1, mb+1, real_batch, noise_batch)
             if epochs > 4:
                 if(epoch % int(epochs/4) == 0):
-                    self.sample_images(epoch, 5, 5)
+                    self.sample_images(epoch+1, 5, 5)
             else:
-                self.sample_images(epoch, 5, 5)
+                self.sample_images(epoch+1, 5, 5)
 
         saver.save(self.sess, "models/model.ckpt")
         print('Model saved...')
@@ -413,5 +437,10 @@ class WGAN():
 
 
 if __name__ == '__main__':
-    gan_test = WGAN(load_database(), check_grad=False, clip=False, opt='RMSProp', reset_model=True, do_grad_penalty=True)
-    gan_test.train(epochs=4, batch_size=64)
+    DATASET = 'mnist'
+    WIDTH = 28
+    HEIGHT = 28
+    CHANNEL = 1
+    Z_DIM = 10
+    gan_test = WGAN(load_database(), check_grad=False, clip=False, opt='Adam', reset_model=True, do_grad_penalty=True)
+    # gan_test.train(epochs=4, batch_size=64)
