@@ -167,12 +167,11 @@ class Generator():
 
     def __call__(self, input_noise):
         with tf.compat.v1.variable_scope(self.name):
-            self.summary += 'Input : %s\n' % str(input_noise)
             self.grow(input_noise, len(self.res)-1)
             return self.outputs
 
     def vars(self):
-        return [var for var in tf.compat.v1.global_variables() if self.name in var.name]
+        return [var for var in tf.compat.v1.global_variables() if (self.name+'/Gen_conv_block_layer' in var.name or 'To_image_layer_3_2' in var.name)]
 
     def print_summary(self):
         print(self.summary)
@@ -219,9 +218,7 @@ class Critic():
 
     def __call__(self, input_image, reuse=False):
         with tf.compat.v1.variable_scope(self.name, reuse=reuse):
-            if not reuse:
-                self.summary += 'Input : %s\n' % str(input_image)
-            x = self.grow(input_image, len(self.res)-1, reuse)
+            x = self.grow(input_image, 0, reuse)
             return self.to_logit(x, reuse)
 
     def vars(self, layer='all'):
@@ -233,8 +230,8 @@ class Critic():
 
     def block(self, input_, nb_filter, num, reuse):
         with tf.compat.v1.variable_scope('Crit_block_layer_%d' % num, reuse=reuse):
-            x = conv2d(input_, nb_filter, self.filter_size, [1, 1], num=1)
-            x = conv2d(x, nb_filter, self.filter_size, [1, 1] if num == 1 else [2, 2], num=2)
+            # x = conv2d(input_, nb_filter, self.filter_size, [1, 1], num=1)
+            x = conv2d(input_, nb_filter, self.filter_size, [1, 1] if num == 1 else [2, 2], num=2)
             output = leaky_relu(x)
             if not reuse:
                 self.summary += 'Crit_block_layer_%d : %s\n' % (num, str(output))
@@ -250,13 +247,13 @@ class Critic():
                 self.summary += 'To_logit_layer : %s\n' % str(output)
             return tf.nn.sigmoid(output), output
 
-    def grow(self, input_, res_ind, reuse, num=1):
-        if res_ind > 0:
-            x = self.block(input_, self.nb_filter[res_ind], num, reuse)
-            self.outputs = []
-            return self.grow(x, res_ind-1, reuse, num+1)
+    def grow(self, input_, res_ind, reuse):
+        if res_ind < len(self.res)-1:
+            y = self.grow(input_, res_ind+1, reuse)
+            x = self.block(y, self.nb_filter[res_ind], len(self.res)-res_ind, reuse)
+            return x
         else:
-            return self.block(input_, self.nb_filter[res_ind], num, reuse)
+            return self.block(input_, self.nb_filter[res_ind], len(self.res)-res_ind, reuse)
 
 
 class WGAN():
@@ -269,10 +266,10 @@ class WGAN():
         self.res = get_resolutions()
 
         with tf.compat.v1.variable_scope('GAN/Transition'):
-            self.alphas_transition = [tf.compat.v1.Variable(0., 'alpha_%d' % i) for i in range(len(self.res)-1)]
+            self.alphas_transition = [tf.compat.v1.Variable(1., 'alpha_%d' % i) for i in range(len(self.res)-1)]
 
-        self.g_net = Generator(128, 3, self.res, self.alphas_transition)
-        self.c_net = Critic(128, 3, self.res, self.alphas_transition)
+        self.g_net = Generator(64, 3, self.res, self.alphas_transition)
+        self.c_net = Critic(64, 3, self.res, self.alphas_transition)
 
         self.check_grad = check_grad
         self.do_grad_penalty = do_grad_penalty
@@ -291,10 +288,10 @@ class WGAN():
         self.X = tf.compat.v1.placeholder(tf.float32, [None, HEIGHT, WIDTH, CHANNEL])
         self.Z = tf.compat.v1.placeholder(tf.float32, [None, Z_DIM])
 
-        self.generator = self.g_net(self.Z)
+        self.generator = self.g_net(self.Z)[-1]
         real_output, real_logits = self.c_net(self.X)
-        # self.g_net.print_summary()
-        # self.c_net.print_summary()
+        self.g_net.print_summary()
+        self.c_net.print_summary()
         fake_output, fake_logits = self.c_net(self.generator, reuse=True)
         self.crit_acc_real = tf.reduce_mean(tf.cast(tf.equal(tf.round(real_output), tf.ones_like(real_output)), tf.float32))
         self.crit_acc_fake = tf.reduce_mean(tf.cast(tf.equal(tf.round(fake_output), tf.zeros_like(fake_output)), tf.float32))
@@ -443,4 +440,4 @@ if __name__ == '__main__':
     CHANNEL = 1
     Z_DIM = 10
     gan_test = WGAN(load_database(), check_grad=False, clip=False, opt='Adam', reset_model=True, do_grad_penalty=True)
-    # gan_test.train(epochs=4, batch_size=64)
+    gan_test.train(epochs=4, batch_size=64)
