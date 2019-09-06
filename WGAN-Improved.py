@@ -23,22 +23,44 @@ plt.close('all')
 np.random.seed(0)
 
 
-def load_database():
-    if DATASET == 'cifar':
-        (x_train, y_train), (_, _) = datasets.cifar10.load_data()
-        indx = y_train == 5
-        x_train = x_train[indx.squeeze()]
-    else:
+def get_resolutions(width):
+    res = [width]
+    while width-int(width) == 0 and width > 2:
+        width /= 2
+        res = [int(width)] + res
+    return res[1:]
+
+
+def load_database(dataset='mnist'):
+    try:
+        with open('datasets/'+dataset+'.pkl', 'rb') as f:
+            print('Opening the database...')
+            return pickle.load(f)
+    except FileNotFoundError:
+        print('Downloading and processing database...')
+        process_data(dataset)
+        print('Done, opening it...')
+        with open('datasets/'+dataset+'.pkl', 'rb') as f:
+            return pickle.load(f)
+
+
+def process_data(dataset='mnist'):
+    training_set = {}
+    if dataset == 'mnist':
         (x_train, y_train), (_, _) = datasets.mnist.load_data()
-        indx = y_train == 5
-        x_train = x_train[indx]
-        x_train = np.expand_dims(x_train, axis=-1)
-    X = x_train.astype('float32')
-    X = (X - 127.5) / 127.5
-    if DATASET != 'cifar':
-        return -X
     else:
-        return X
+        (x_train, y_train), (_, _) = datasets.cifar10.load_data()
+    if(len(x_train.shape) == 3):
+        x_train = np.expand_dims(x_train, axis=-1)
+    x_train = x_train.astype('float32')
+    x_train = (x_train - 127.5) / 127.5
+    image_shape = x_train.shape[1:]
+    res = get_resolutions(x_train.shape[1])[::-1]
+    training_set['res_%d' % res[0]] = x_train
+    for i, j in enumerate(res[1:]):
+        training_set['res_%d' % j] = zoom(x_train, [1, 1/(2**(i+1)), 1/(2**(i+1)), 1], mode='nearest')
+    with open('datasets/'+dataset+'.pkl', 'wb') as f:
+        pickle.dump([training_set, y_train, image_shape], f)
 
 
 def plot_sample(samples, nrows, ncols):
@@ -133,15 +155,6 @@ def transition(a, b, alpha_trans):
     return (1-alpha_trans) * a + alpha_trans * b
 
 
-def get_resolutions():
-    a = WIDTH
-    res = [a]
-    while a-int(a) == 0 and a > 2:
-        a /= 2
-        res = [int(a)] + res
-    return res[1:]
-
-
 def get_filters(res, greatest_number):
     nb_filters = [greatest_number]
     for i in range(len(res)-1):
@@ -151,25 +164,26 @@ def get_filters(res, greatest_number):
 
 def build_schemes(res, nb_filter, alphas):
     schemes = {}
-    for i, (j, k) in enumerate(zip(res, nb_filter)):
+    for i, j in enumerate(nb_filter):
         if i == 0:
-            init_filt = k
+            init_filt = j
             schemes['phase_%d' % (i+1)] = [init_filt, [], None, None]
         else:
-            schemes['phase_%d' % (2*i)] = [init_filt, schemes['phase_%d' % (2*i-1)][1], k, alphas[i-1]]
-            schemes['phase_%d' % (2*i+1)] = [init_filt, schemes['phase_%d' % (2*i-1)][1]+[k], None, None]
+            schemes['phase_%d' % (2*i)] = [init_filt, schemes['phase_%d' % (2*i-1)][1], j, alphas[i-1]]
+            schemes['phase_%d' % (2*i+1)] = [init_filt, schemes['phase_%d' % (2*i-1)][1]+[j], None, None]
     return schemes
 
 
 def to_name(tensor):
-    to_return = str(tensor).replace(', dtype=float32)', '').replace('Tensor("','').replace('GAN/Critic','').replace('GAN/Generator', '')
-    if(to_return[0]=='/'):
+    to_return = str(tensor).replace(', dtype=float32)', '').replace('Tensor("', '').replace('GAN/Critic', '').replace('GAN/Generator', '')
+    if(to_return[0] == '/'):
         return to_return[1:]
-    m = re.search('\d/', to_return)
-    if(m):
+    m = re.search(r'\d/', to_return)
+    if m:
         return to_return[m.start()+2:]
     else:
         return to_return
+
 
 class Generator():
 
@@ -202,7 +216,7 @@ class Generator():
             return output
 
     def do_summary(self, phase):
-        self.summary['phase_%d' % phase] = 'Generator caracteristics :\n'
+        self.summary['phase_%d' % phase] = 'Generator caracteristics :\n\n'
         for i in self.var_infos:
             if len(i) == 2:
                 self.summary['phase_%d' % phase] += 'Output : %s | Input : %s\n' % (to_name(i[0]), to_name(i[1]))
@@ -263,7 +277,7 @@ class Critic():
             if(phase == 0):
                 x = self.add_from_image_block(input_, scheme[0], phase, phase)
             else:
-                if(phase%2==1):
+                if(phase % 2 == 1):
                     x = self.add_from_image_block(input_, scheme[1][-1] if not scheme[2] else scheme[2], phase, phase)
                 else:
                     x = self.add_from_image_block(input_, scheme[1][-1] if not scheme[2] else scheme[2], phase, phase-1)
@@ -278,7 +292,7 @@ class Critic():
             return tf.nn.sigmoid(output), output
 
     def do_summary(self, phase):
-        self.summary['phase_%d' % phase] = 'Critic caracteristics :\n'
+        self.summary['phase_%d' % phase] = 'Critic caracteristics :\n\n'
         for i in self.var_infos:
             if len(i) == 2:
                 self.summary['phase_%d' % phase] += 'Output : %s | Input : %s\n' % (to_name(i[0]), to_name(i[1]))
@@ -336,11 +350,11 @@ class WGAN():
 
         tf.compat.v1.reset_default_graph()
 
-        self.real_data = shuffle(data)
-        self.res = get_resolutions()
+        self.real_data = data
+        self.res = get_resolutions(WIDTH)
         self.nb_filter = get_filters(self.res, 64)
         with tf.compat.v1.variable_scope('GAN/Transition'):
-            self.alphas_transition = [tf.compat.v1.Variable(1., name='alpha_%d' % i) for i in range(len(self.res)-1)]
+            self.alphas_transition = [tf.compat.v1.Variable(1., name='alpha_%d' % (i+1)) for i in range(len(self.res)-1)]
         self.schemes = build_schemes(self.res, self.nb_filter, self.alphas_transition)
         self.g_net = Generator(4, self.res[0])
         self.c_net = Critic(4)
@@ -362,13 +376,16 @@ class WGAN():
         self.X = [tf.compat.v1.placeholder(tf.float32, [None, i, i, CHANNEL]) for i in self.res]
         self.Z = tf.compat.v1.placeholder(tf.float32, [None, Z_DIM])
         self.phase = {}
+        print('Processing phases...')
         for p, i in enumerate(self.schemes.values()):
-            print('\n------------Phase %d------------\n' % (p+1))
+            print('------------Phase %d------------' % (p+1))
             self.phase['phase_%d' % p] = {}
             if(p == 0):
                 input_ = self.X[0]
             else:
                 input_ = self.X[round(p/2+0.01)]
+            self.phase['phase_%d' % p]['input'] = input_
+            self.phase['phase_%d' % p]['res'] = input_.shape[2]
             self.phase['phase_%d' % p]['gen_output'] = self.g_net(self.Z, i, p)
             real_output, real_logits = self.c_net(input_, i, p)
             fake_output, fake_logits = self.c_net(self.phase['phase_%d' % p]['gen_output'], i, p, False)
@@ -382,16 +399,18 @@ class WGAN():
             self.phase['phase_%d' % p]['gen_step'] = self.optimizer.minimize(self.phase['phase_%d' % p]['gen_loss'], var_list=self.g_net.get_all_vars(p))
             self.phase['phase_%d' % p]['crit_step'] = self.optimizer.minimize(self.phase['phase_%d' % p]['crit_loss'], var_list=self.c_net.get_all_vars(p))
             self.g_net.print_summary(p)
-            for i in self.g_net.get_all_vars(p):
-                print(i)
+            # for i in self.g_net.get_all_vars(p):
+            #     print(i)
             self.c_net.print_summary(p)
-            for i in self.c_net.get_all_vars(p):
-                print(i)
+            # for i in self.c_net.get_all_vars(p):
+            #     print(i)
 
-        sys.exit()
+        print('All phases processed...')
 
         gpu_options = tf.compat.v1.GPUOptions(allow_growth=True)
         self.sess = tf.compat.v1.Session(config=tf.compat.v1.ConfigProto(gpu_options=gpu_options))
+
+        print('GPUs OK...')
 
     def get_gradient_penalty(self, real, fake, critic, scheme, phase, lamda=10):
         epsilon = tf.compat.v1.random_uniform([], 0.0, 1.0)
@@ -415,11 +434,15 @@ class WGAN():
             print(param)
         print('Total generator trainable parameters : %d' % int(nb_params))
 
-    def train(self, epochs=100, batch_size=64):
+    def train(self, g_iterations_per_phase=100, batch_size=64, phase='one'):
         self.c_losses_real, self.c_losses_fake, self.c_losses, self.g_losses, self.grad_penalties = [], [], [], [], []
         c_iters = 5
         self.sess.run(tf.compat.v1.global_variables_initializer())
         self.sess.run(tf.compat.v1.local_variables_initializer())
+        for key in self.real_data.keys():
+            self.real_data[key] = shuffle(self.real_data[key])
+
+        print('Checking for saved model...')
 
         saver = tf.compat.v1.train.Saver()
         if 'model.ckpt.meta' in os.listdir('models/'):
@@ -434,61 +457,48 @@ class WGAN():
                 os.remove('generated/'+i)
 
         print('Start Training...')
-        self.total_batch_of_batches = int(len(self.real_data)//(batch_size*c_iters))
-        for epoch in range(epochs):
-            if(epoch > 0):
-                c_iters = 5
-                self.total_batch_of_batches = int(len(self.real_data)//(batch_size*c_iters))
-            print('--------------------Epoch no. %d---------------------' % (epoch+1))
-            self.real_data = shuffle(self.real_data)
-            for mb in range(self.total_batch_of_batches):
-                batch_of_real_batches = self.real_data[mb*batch_size:(mb+c_iters)*batch_size]
+        for key, value in self.phase.items():
+            if phase == 'one' and key == 'phase_1':
+                break
+            res = value['res']
+            training_set = self.real_data['res_%d' % res]
+            for ite in range(g_iterations_per_phase):
+                phase_num = int(key[-1])
+                if phase_num % 2 == 1:
+                    print('TODO:alpha transition')
                 for c_iter in range(c_iters):
-                    real_batch = batch_of_real_batches[c_iter*batch_size:(c_iter+1)*batch_size]
+                    indx = np.random.randint(len(training_set), size=batch_size)
+                    real_batch = training_set[indx]
                     noise_batch = create_noise_batch(batch_size)
-                    self.sess.run(self.crit_step, feed_dict={self.X: real_batch,
-                                                             self.Z: noise_batch})
+                    self.sess.run(value['crit_step'], feed_dict={value['input']: real_batch,
+                                                                 self.Z: noise_batch})
                 noise_batch = create_noise_batch(batch_size)
-                self.sess.run(self.gen_step, feed_dict={self.Z: noise_batch})
-
-                self.follow_evolution(epoch+1, mb+1, real_batch, noise_batch)
-            if epochs > 4:
-                if((epoch+1) % int(epochs/4) == 0):
-                    self.sample_images(epoch+1, 5, 5)
-            else:
-                self.sample_images(epoch+1, 5, 5)
+                self.sess.run(value['gen_step'], feed_dict={self.Z: noise_batch})
+                self.follow_evolution(ite+1, key, value, real_batch, noise_batch)
+                if (ite+1) % 20 == 0:
+                    self.sample_images(ite+1, value['gen_output'], 5, 5)
 
         saver.save(self.sess, "models/model.ckpt")
         print('Model saved...')
         self.plot_losses()
 
-    def follow_evolution(self, epoch, mb, real_batch, noise_batch):
-        to_print = 'E.%d | BoB.%d/%d' % (epoch, mb, self.total_batch_of_batches)
-        c_loss_real, c_loss_fake, c_acc_real, c_acc_fake = self.sess.run([self.crit_loss_real,
-                                                                          self.crit_loss_fake,
-                                                                          self.crit_acc_real,
-                                                                          self.crit_acc_fake],
-                                                                         feed_dict={self.X: real_batch,
+    def follow_evolution(self, ite, phase, value, real_batch, noise_batch):
+        to_print = '%s | Ite.%d' % (phase, ite)
+        c_loss_real, c_loss_fake, c_acc_real, c_acc_fake = self.sess.run([value['crit_loss_real'],
+                                                                          value['crit_loss_fake'],
+                                                                          value['crit_acc_real'],
+                                                                          value['crit_acc_fake']],
+                                                                         feed_dict={value['input']: real_batch,
                                                                                     self.Z: noise_batch})
         to_print += ' | car = %d%%, caf = %d%%, clr = %.3f, clf = %.3f' % (int(100*c_acc_real), int(100*c_acc_fake), c_loss_real, c_loss_fake)
-        if self.do_grad_penalty:
-            g_penalty = self.sess.run(self.gradient_penalty, feed_dict={self.X: real_batch,
-                                                                        self.Z: noise_batch})
-            c_loss = c_loss_real + c_loss_fake + g_penalty
-            self.grad_penalties += [g_penalty]
-            to_print += ', cl = %.3f, gp = %.3f' % (c_loss, g_penalty)
-        else:
-            c_loss = c_loss_real + c_loss_fake
-            to_print += ', cl = %.3f' % (c_loss)
+        g_penalty = self.sess.run(value['grad_penalty'], feed_dict={value['input']: real_batch,
+                                                                    self.Z: noise_batch})
+        c_loss = c_loss_real + c_loss_fake + g_penalty
+        self.grad_penalties += [g_penalty]
+        to_print += ', cl = %.3f, gp = %.3f' % (c_loss, g_penalty)
 
-        g_loss = self.sess.run(self.gen_loss, feed_dict={self.Z: noise_batch})
+        g_loss = self.sess.run(value['gen_loss'], feed_dict={self.Z: noise_batch})
         to_print += ' | gl = %.3f' % g_loss
-
-        if self.check_grad:
-            g_grad = self.sess.run(self.gen_gradients_norm, feed_dict={self.Z: noise_batch})
-            d_grad = self.sess.run(self.crit_gradients_norm, feed_dict={self.X: real_batch,
-                                                                        self.Z: noise_batch})
-            to_print += ' | cgrad = %.3f, ggrad = %.3f' % (d_grad, g_grad)
 
         self.c_losses_real += [c_loss_real]
         self.c_losses_fake += [c_loss_fake]
@@ -502,24 +512,22 @@ class WGAN():
         plt.plot(self.c_losses_real)
         plt.plot(self.c_losses_fake)
         plt.plot(self.g_losses)
-        if self.do_grad_penalty:
-            plt.plot(self.grad_penalties)
+        plt.plot(self.grad_penalties)
         plt.title('Loss evolution')
         plt.show()
 
-    def sample_images(self, epoch, nrows, ncols):
+    def sample_images(self, ite, gen, nrows, ncols):
         noise = create_noise_batch(ncols*nrows)
-        gen_imgs = self.sess.run(self.generator, feed_dict={self.Z: noise})
+        gen_imgs = self.sess.run(gen, feed_dict={self.Z: noise})
         fig = plot_sample(gen_imgs, nrows, ncols)
-        fig.suptitle('Sample generated by the GAN at epoch %d' % epoch)
-        fig.savefig('generated/epoch%d.png' % epoch)
+        fig.suptitle('Sample generated by the GAN at iteration %d' % ite)
+        fig.savefig('generated/iteration%d.png' % ite)
 
 
 if __name__ == '__main__':
-    DATASET = 'mnist'
-    WIDTH = 28
-    HEIGHT = 28
-    CHANNEL = 1
+    DATASET = 'mnist'  # Choose between mnist & cifar10
     Z_DIM = 100
-    gan_test = WGAN(load_database(), opt='Adam', reset_model=True)
-    gan_test.train(epochs=4, batch_size=64)
+    training_set, labels, [WIDTH, HEIGHT, CHANNEL] = load_database(DATASET)
+    print('Done, building the model...')
+    # gan_test = WGAN(load_database()[0], opt='Adam', reset_model=True)
+    # gan_test.train(g_iterations_per_phase=100, batch_size=64)
