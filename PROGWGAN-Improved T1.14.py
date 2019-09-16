@@ -18,7 +18,6 @@ import tensorflow as tf
 from scipy.ndimage.interpolation import zoom
 from sklearn.utils import shuffle
 
-
 plt.close('all')
 np.random.seed(0)
 
