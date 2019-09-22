@@ -7,11 +7,8 @@ Created on Wed Aug 28 21:27:21 2019
 
 import os
 import pickle
-import shutil
-import sys
-import re
 
-import keras.datasets as datasets
+import tensorflow.keras.datasets as datasets
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
@@ -23,6 +20,18 @@ np.random.seed(10)
 
 
 def get_resolutions(width):
+    """This function returns a list of the resolutions we 
+    will use during the learning of the progressive Gan
+
+    e.g. The image we aim to generate is 28x28, we will
+    input 28 to this function and it will return [7,14,28]
+
+    Arguments:
+        width {int} -- The width of the normal image
+
+    Returns:
+        list -- list of resolutions
+    """
     res = [width]
     while width-int(width) == 0 and width > 2:
         width /= 2
@@ -31,6 +40,20 @@ def get_resolutions(width):
 
 
 def load_database(dataset='mnist'):
+    """This function try to load the database from the files,
+    and if it fails, call an other function downloading and 
+    processing the database
+
+    Keyword Arguments:
+        dataset {str} -- The name of the dataset we want to use
+        (default: {'mnist'})
+
+    Returns:
+        list -- a list of the form [training_set, labels, image_shape]
+        directly loaded from the files, where training_set is a dictionary containing
+        the different training set (with different resolution), labels contains
+        the associated labels, and image_shape the shape of the normal image (not reduced)
+    """
     try:
         with open('datasets/'+dataset+'.pkl', 'rb') as f:
             print('Opening the database...')
@@ -44,11 +67,24 @@ def load_database(dataset='mnist'):
 
 
 def process_data(dataset='mnist'):
+    """This function create a file in the system containing the processed
+    database of images, creating lower resolution image from the normal ones.
+    To understand the content of this file, see the "load_database" function
+
+    Keyword Arguments:
+        dataset {str} -- The name of the dataset we want to use
+        (default: {'mnist'})
+
+    Raises:
+        ValueError: If the argument is not a known database
+    """
     training_set = {}
     if dataset == 'mnist':
         (x_train, y_train), (_, _) = datasets.mnist.load_data()
-    else:
+    elif dataset == 'cifar10':
         (x_train, y_train), (_, _) = datasets.cifar10.load_data()
+    else:
+        raise ValueError("The dataset must be cifar10 or mnist.")
     if(len(x_train.shape) == 3):
         x_train = np.expand_dims(x_train, axis=-1)
     x_train = x_train.astype('float32')
@@ -63,6 +99,17 @@ def process_data(dataset='mnist'):
 
 
 def plot_sample(samples, nrows, ncols):
+    """This function returns a matplotlib figure with images plotted
+    on it
+
+    Arguments:
+        samples {list} -- the list of image we want to plot
+        nrows {int} -- the number of rows
+        ncols {int} -- the number of colums
+
+    Returns:
+        matplotlib.figure -- a fig with the plotted images
+    """
     fig, ax = plt.subplots(nrows=nrows, ncols=ncols, figsize=(6, 6), sharex=True, sharey=True)
     for i in range(nrows):
         for j in range(ncols):
@@ -79,10 +126,31 @@ def plot_sample(samples, nrows, ncols):
 
 
 def create_noise_batch(size):
+    """This function create a batch of noise of size "size"
+    and returns it
+
+    Arguments:
+        size {int} -- the batch size
+
+    Returns:
+        tf.tensor -- the tensor of noise
+    """
     return tf.random.normal([size, Z_DIM])
 
 
 def get_filters(res, greatest_number):
+    """This function returns a list of number of filter we will
+    use in our convolutionnal layers while growing the Gan
+
+    Arguments:
+        res {list} -- the list of resolutions used
+        greatest_number {int} -- the greatest number of filter used 
+        (for the layer with the smallest resolution)
+
+    Returns:
+        list -- a list of number of filter we will
+        use in our convolutionnal layers while growing the Gan
+    """
     nb_filters = [greatest_number]
     for i in range(len(res)-1):
         nb_filters += [int(nb_filters[-1]/2)]
@@ -90,10 +158,20 @@ def get_filters(res, greatest_number):
 
 
 def to_name(tensor):
+    """This function create an easier name of tensor for debugging purposes
+
+    Arguments:
+        tensor {tensor} -- the tensor we want to process
+
+    Returns:
+        string -- an easier name of the given tensor
+    """
     return str(tensor).replace(', dtype=float32)', '').replace('Tensor("', '').replace('",', '')
 
 
 class CustomConv2D(tf.keras.layers.Conv2D):
+    """A custom convolutional layer managing equalized learning rate (in development)"""
+
     def __init__(self, gain=np.sqrt(2), **kwargs):
         super().__init__(kernel_initializer=tf.random_normal_initializer(stddev=0.02), use_bias=False, padding='same', **kwargs)
         self.gain = gain
@@ -112,6 +190,8 @@ class CustomConv2D(tf.keras.layers.Conv2D):
 
 
 class CustomDense(tf.keras.layers.Dense):
+    """A custom dense layer managing equalized learning rate (in development)"""
+
     def __init__(self, gain=np.sqrt(2), **kwargs):
         super().__init__(kernel_initializer=tf.random_normal_initializer(stddev=0.02), use_bias=False, **kwargs)
         self.gain = gain
@@ -130,6 +210,8 @@ class CustomDense(tf.keras.layers.Dense):
 
 
 class CustomConv2DTranspose(tf.keras.layers.Conv2DTranspose):
+    """A custom deconvolutional layer managing equalized learning rate (in development)"""
+
     def __init__(self, gain=np.sqrt(2), **kwargs):
         super().__init__(kernel_initializer=tf.random_normal_initializer(stddev=0.02), use_bias=False, padding='same', **kwargs)
         self.gain = gain
@@ -148,6 +230,8 @@ class CustomConv2DTranspose(tf.keras.layers.Conv2DTranspose):
 
 
 class AddBiasLayer(tf.keras.layers.Layer):
+    """A custom layer adding biases"""
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -164,6 +248,8 @@ class AddBiasLayer(tf.keras.layers.Layer):
 
 
 class PixelNorm(tf.keras.layers.Layer):
+    """A custom layer for the pixelwise feature vector normalization"""
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -172,6 +258,8 @@ class PixelNorm(tf.keras.layers.Layer):
 
 
 class MbstdLayer(tf.keras.layers.Layer):
+    """A custom layer for the mini batch standard deviation"""
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -187,6 +275,8 @@ class MbstdLayer(tf.keras.layers.Layer):
 
 
 class TransitionLayer(tf.keras.layers.Add):
+    """A custom layer to add the output of two layers"""
+
     def __init__(self, alpha, **kwargs):
         super().__init__(**kwargs)
         self.alpha = alpha
@@ -196,6 +286,8 @@ class TransitionLayer(tf.keras.layers.Add):
 
 
 class UpScale2D(tf.keras.layers.Layer):
+    """A custom layer to upscale (resolution*2) an image"""
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -207,6 +299,8 @@ class UpScale2D(tf.keras.layers.Layer):
 
 
 class DownScale2D(tf.keras.layers.Layer):
+    """A custom layer to downscale (resolution/2) an image"""
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -215,7 +309,9 @@ class DownScale2D(tf.keras.layers.Layer):
         return tf.nn.avg_pool2d(input_, ksize=ksize, strides=ksize, padding='VALID')
 
 
-class OwnModel():
+class Block():
+    """Block class from which all block classes will inherit"""
+
     def __init__(self, biases=False):
         self.infos = None
         self.biases = biases
@@ -224,7 +320,10 @@ class OwnModel():
         return self.infos
 
 
-class GenInitialBlock(OwnModel):
+class GenInitialBlock(Block):
+    """The initial block of the generator, the one taking the noise as input and processing it
+    with dense and reshape layer, and finally with a convolution layer"""
+
     def __init__(self, nb_filter, lowest_res, **kwargs):
         super().__init__(**kwargs)
         self.dense_1 = CustomDense(gain=np.sqrt(2)/4, units=nb_filter*lowest_res*lowest_res)
@@ -244,7 +343,9 @@ class GenInitialBlock(OwnModel):
         return output
 
 
-class GenBlock(OwnModel):
+class GenBlock(Block):
+    """A block of the generator, with a deconvolution, a bias, an activation and a pixel normalization"""
+
     def __init__(self, nb_filter, filter_size, **kwargs):
         super().__init__(**kwargs)
         self.conv2dtranspose_1 = CustomConv2DTranspose(filters=nb_filter, kernel_size=filter_size, strides=2)
@@ -262,7 +363,10 @@ class GenBlock(OwnModel):
         return output
 
 
-class GenResidualBlock(OwnModel):
+class GenResidualBlock(Block):
+    """A residual block of the generator, the one used for introducing progressively a new block 
+    when growing the Gan"""
+
     def __init__(self, alpha, **kwargs):
         super().__init__(**kwargs)
         self.transition_1 = TransitionLayer(alpha)
@@ -274,7 +378,9 @@ class GenResidualBlock(OwnModel):
         return output
 
 
-class ToRGB(OwnModel):
+class ToRGB(Block):
+    """The ToRGB block of the paper"""
+
     def __init__(self, filter_size, **kwargs):
         super().__init__(**kwargs)
         self.conv_1 = CustomConv2D(gain=1, filters=CHANNEL, kernel_size=filter_size, strides=1)
@@ -290,7 +396,9 @@ class ToRGB(OwnModel):
         return output
 
 
-class FromRGB(OwnModel):
+class FromRGB(Block):
+    """The FromRGB block of the paper"""
+
     def __init__(self, nb_filter, filter_size, **kwargs):
         super().__init__(**kwargs)
         self.conv_1 = CustomConv2D(filters=nb_filter, kernel_size=filter_size, strides=1)
@@ -306,7 +414,9 @@ class FromRGB(OwnModel):
         return output
 
 
-class CritBlock(OwnModel):
+class CritBlock(Block):
+    """A block of the critic, with a convolution, a bias and an activation"""
+
     def __init__(self, nb_filter, filter_size, **kwargs):
         super().__init__(**kwargs)
         self.conv_1 = CustomConv2D(filters=nb_filter, kernel_size=filter_size, strides=2)
@@ -322,7 +432,11 @@ class CritBlock(OwnModel):
         return output
 
 
-class CritInitialBlock(OwnModel):
+class CritInitialBlock(Block):
+    """The initial block of the critic, taking the output of the fromRGB block or 
+    the output of the previous layer and returning a logit. It uses the mini batch
+    standard deviation layer."""
+
     def __init__(self, nb_filter, filter_size, **kwargs):
         super().__init__(**kwargs)
         self.mbstd = MbstdLayer()
@@ -346,7 +460,10 @@ class CritInitialBlock(OwnModel):
         return output
 
 
-class CritResidualBlock(OwnModel):
+class CritResidualBlock(Block):
+    """A residual block of the critic, the one used for introducing progressively a new block 
+    when growing the Gan"""
+
     def __init__(self, nb_filter, filter_size, alpha, **kwargs):
         super().__init__(**kwargs)
         self.conv_1 = CustomConv2D(filters=nb_filter, kernel_size=filter_size, strides=1)
@@ -371,6 +488,9 @@ class CritResidualBlock(OwnModel):
 
 
 class Generator():
+    """The generator class, used to build the generator, assigning each block to the right place
+    and managing the residual blocks."""
+
     def __init__(self, filter_size, filters, res, alphas, **kwargs):
         super().__init__(**kwargs)
         self.summary = {}
@@ -423,6 +543,9 @@ class Generator():
 
 
 class Critic():
+    """The critic class, used to build the critic, assigning each block to the right place
+    and managing the residual blocks."""
+
     def __init__(self, filter_size, filters, res, alphas, **kwargs):
         super().__init__(**kwargs)
         self.summary = {}
@@ -472,7 +595,11 @@ class Critic():
         print(self.summary['phase_%d' % phase])
 
 
-class WGAN():
+class ProgWGAN():
+    """ The class building the Gan, managing the growing process splitting it
+    into phases, and each phase will teach only some parts of the generator
+    and the critic, with some phases during which the Gan will grow, making the
+    alpha shift progressively from 0 to 1"""
 
     def __init__(self, data, opt='RMSProp', reset_model=False, summary=True):
 
@@ -631,8 +758,8 @@ class WGAN():
 
 if __name__ == '__main__':
     DATASET = 'mnist'  # Choose between mnist & cifar10
-    Z_DIM = 100
-    training_set, labels, [WIDTH, HEIGHT, CHANNEL] = load_database(DATASET)
+    Z_DIM = 100  # Size of the noise
+    training_set, labels, [WIDTH, HEIGHT, CHANNEL] = load_database(DATASET)  # Loading the dataset
     print('Done, building the model...')
-    gan_test = WGAN(training_set, opt='Adam', reset_model=True, summary=False)
-    gan_test.train(g_iterations_per_phase=200, batch_size=64, phase=3)
+    gan_test = ProgWGAN(training_set, opt='Adam', reset_model=True, summary=False)  # Creating the progressive Gan
+    gan_test.train(g_iterations_per_phase=200, batch_size=64, phase=3)  # Training it
