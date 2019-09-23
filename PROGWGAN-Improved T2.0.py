@@ -733,7 +733,7 @@ class ProgWGAN():
                     to_print += ', cl = %.3f, gp = %.3f' % (c_loss, g_penalty)
                     to_print += ' | gl = %.3f' % g_loss
                     print(to_print)
-                if (gen_ite) % 100 == 0:
+                if (gen_ite) % 50 == 0:
                     self.sample_images(gen_ite, phase_num, value['gen_model'], 5, 5)
 
         print('Model saved...')
@@ -762,4 +762,4 @@ if __name__ == '__main__':
     training_set, labels, [WIDTH, HEIGHT, CHANNEL] = load_database(DATASET)  # Loading the dataset
     print('Done, building the model...')
     gan_test = ProgWGAN(training_set, opt='Adam', reset_model=True, summary=False)  # Creating the progressive Gan
-    gan_test.train(g_iterations_per_phase=200, batch_size=64, phase=3)  # Training it
+    gan_test.train(g_iterations_per_phase=300, batch_size=64, phase=5)  # Training it
